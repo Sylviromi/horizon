@@ -81,6 +81,10 @@ struct BlockFile {
     template: String,
     #[serde(default)]
     properties: BlockProperties,
+    #[serde(default)]
+    connects_to: Option<String>,
+    #[serde(default)]
+    thickness: Option<f32>,
     #[serde(default = "yes")]
     item: bool,
 }
@@ -99,6 +103,13 @@ pub struct Block {
     pub properties: BlockProperties,
     /// Also add a block item with the same id.
     pub item: bool,
+    /// A connecting block (template `minecraft:chorus_plant`, a `PipeBlock`
+    /// without the chorus plant's rules): the block tag, without `#`, whose
+    /// blocks it joins besides itself (a cable's machines).
+    pub connects_to: Option<String>,
+    /// A connecting block's width in pixels (2 to 14): its shapes, the
+    /// chorus plant's (10) when unset.
+    pub thickness: Option<f32>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -334,6 +345,10 @@ impl Content {
                 template: file.template,
                 properties: file.properties,
                 item: file.item,
+                connects_to: file
+                    .connects_to
+                    .map(|t| t.trim_start_matches('#').to_owned()),
+                thickness: file.thickness,
             });
         }
         for (item, name) in items {
@@ -415,6 +430,30 @@ fn check_block(file: &BlockFile) -> Result<(), String> {
     }
     if p.sounds.as_deref().is_some_and(|s| !vanilla_id(s)) {
         return Err("sounds names a vanilla block (minecraft:...)".into());
+    }
+    if let Some(tag) = &file.connects_to {
+        if file.template != "minecraft:chorus_plant" {
+            return Err("connects_to needs template minecraft:chorus_plant (a PipeBlock)".into());
+        }
+        let id = tag.strip_prefix('#').unwrap_or_default();
+        let valid = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_-./".contains(c))
+        };
+        if !id
+            .split_once(':')
+            .is_some_and(|(ns, path)| valid(ns) && valid(path))
+        {
+            return Err("connects_to is a block tag, #namespace:path".into());
+        }
+    }
+    match file.thickness {
+        Some(_) if file.connects_to.is_none() => {
+            return Err("thickness is a connecting block's (connects_to)".into());
+        }
+        Some(t) if !(2.0..=14.0).contains(&t) => return Err("thickness is 2 to 14 pixels".into()),
+        _ => {}
     }
     Ok(())
 }
@@ -506,6 +545,8 @@ capabilities = ["registries"]
                     ..BlockProperties::default()
                 },
                 item: true,
+                connects_to: None,
+                thickness: None,
             }]
         );
         assert_eq!(content.items[0].id, "ruby:ruby");
@@ -548,6 +589,41 @@ capabilities = ["registries"]
         assert_eq!(content.files, ["data/ruby/horizon/block/ruby_block.json"]);
         assert_eq!(content.file(&content.files[0]).unwrap(), BLOCK);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A connecting block names a block tag and copies a `PipeBlock`.
+    #[test]
+    fn connecting_blocks_copy_a_pipe_and_name_a_tag() {
+        let block = |json: &str| {
+            let files: &[(&str, &[u8])] =
+                &[("data/ruby/horizon/block/cable.json", json.as_bytes())];
+            hmod("cable", MANIFEST_TEXT, files)
+        };
+        let content = block(
+            r##"{"template": "minecraft:chorus_plant", "connects_to": "#ruby:cable_joins"}"##,
+        )
+        .unwrap();
+        assert_eq!(
+            content.blocks[0].connects_to.as_deref(),
+            Some("ruby:cable_joins")
+        );
+        let thin =
+            r##"{"template": "minecraft:chorus_plant", "connects_to": "#ruby:j", "thickness": 4}"##;
+        assert_eq!(block(thin).unwrap().blocks[0].thickness, Some(4.0));
+        let e = block(r#"{"template": "minecraft:chorus_plant", "thickness": 4}"#).unwrap_err();
+        assert!(e.contains("connects_to"), "{e}");
+        let e = block(r##"{"template": "minecraft:chorus_plant", "connects_to": "#ruby:j", "thickness": 16}"##)
+            .unwrap_err();
+        assert!(e.contains("2 to 14"), "{e}");
+        let e = block(r##"{"template": "minecraft:stone", "connects_to": "#ruby:cable_joins"}"##)
+            .unwrap_err();
+        assert!(e.contains("chorus_plant"), "{e}");
+        for tag in ["ruby:cable_joins", "#cable_joins", "#Ruby:Cable"] {
+            let json =
+                format!(r#"{{"template": "minecraft:chorus_plant", "connects_to": "{tag}"}}"#);
+            let e = block(&json).unwrap_err();
+            assert!(e.contains("block tag"), "{tag}: {e}");
+        }
     }
 
     #[test]

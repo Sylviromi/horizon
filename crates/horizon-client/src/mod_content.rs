@@ -15,6 +15,7 @@
 //! The loaders need no mod code, vanilla state ids never move, and with no
 //! content mod the root is the base root itself.
 use crate::{Result, blocks::MAP_COLORS};
+use horizon_core::geometry::{Axis, VoxelShape};
 use horizon_mods::content::{Block, Content, Rarity};
 use horizon_world::nbt::{self, JavaString, Limits, Tag};
 use serde::{Deserialize, Serialize, de};
@@ -234,6 +235,9 @@ struct NewBlock<'a> {
     rename: Rename,
     /// The template's item, if it has one.
     item: Option<String>,
+    /// A connecting block's shape for each of its states, when it has a
+    /// `thickness` of its own.
+    pipe: Vec<VoxelShape>,
 }
 /// An item being added (declared, or a block's).
 struct NewItem {
@@ -333,10 +337,19 @@ impl<'a> Plan<'a> {
                     }
                     wanted_sounds.push(s.clone());
                 }
+                let pipe = match decl.thickness {
+                    Some(size) => rename
+                        .states
+                        .clone()
+                        .map(|id| pipe_state_shape(&facts, id, size.into()))
+                        .collect::<Result<_>>()?,
+                    None => Vec::new(),
+                };
                 blocks.push(NewBlock {
                     decl,
                     rename,
                     item: None,
+                    pipe,
                 });
             }
         }
@@ -445,6 +458,22 @@ impl<'a> Plan<'a> {
                         row.set("item", J::Str("minecraft:air".into()));
                     }
                     self.override_gameplay(b, &mut row);
+                    if let Some(shape) = b.pipe.get(i) {
+                        let list = |rows: Vec<[f64; 6]>| {
+                            J::Arr(
+                                rows.into_iter()
+                                    .map(|r| J::Arr(r.map(J::f64).into()))
+                                    .collect(),
+                            )
+                        };
+                        let boxes = shape.boxes().iter().map(|a| {
+                            let [x, y, z] =
+                                [Axis::X, Axis::Y, Axis::Z].map(|axis| (a.min(axis), a.max(axis)));
+                            [x.0, y.0, z.0, x.1, y.1, z.1]
+                        });
+                        row.set("outline", list(boxes.collect()));
+                        row.set("outline_edges", list(shape.edges()));
+                    }
                 }
                 list.push(row);
             }
@@ -568,6 +597,18 @@ impl<'a> Plan<'a> {
                         if !b.decl.item {
                             v.set("item", J::Str("minecraft:air".into()));
                         }
+                        // A connecting block: the chorus plant's PipeBlock
+                        // without its rules, joining the declared tag.
+                        if let Some(tag) = &b.decl.connects_to {
+                            let classes = ["PipeBlock", "Block"].map(|c| J::Str(c.into()));
+                            v.set("class", J::Arr(classes.into()));
+                            let mut fields = v
+                                .get("fields")
+                                .cloned()
+                                .unwrap_or(J::Obj(Default::default()));
+                            fields.set("connectsTo", J::Str(tag.clone()));
+                            v.set("fields", fields);
+                        }
                         blocks.push(v);
                     }
                 }
@@ -649,6 +690,37 @@ impl<'a> Plan<'a> {
         Ok(())
     }
 
+    /// A collision table (`shapes` and `cached_shapes`, wherever they are):
+    /// connecting blocks with a thickness get their own shapes.
+    fn pipe_collisions(&self, tag: &mut Tag) {
+        let Tag::Compound(c) = tag else {
+            return;
+        };
+        let has = |k: &str| c.contains_key(&JavaString::from(k));
+        if has("shapes") && has("cached_shapes") {
+            let mut added = Vec::new();
+            if let Some(Tag::List(shapes)) = c.get_mut(&JavaString::from("shapes")) {
+                for b in self.blocks.iter().filter(|b| !b.pipe.is_empty()) {
+                    let first = shapes.len() as i32;
+                    shapes.extend(b.pipe.iter().map(horizon_world::collision::shape_entry));
+                    added.push((b.rename.first, first, b.pipe.len()));
+                }
+            }
+            if let Some(Tag::IntArray(cached)) = c.get_mut(&JavaString::from("cached_shapes")) {
+                for (state, shape, n) in added {
+                    for i in 0..n {
+                        if let Some(slot) = cached.get_mut(state as usize + i) {
+                            *slot = shape + i as i32;
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        for inner in c.values_mut() {
+            self.pipe_collisions(inner);
+        }
+    }
     /// One NBT table: `states` lists, `cached_shapes` arrays and `blocks`
     /// compounds, wherever they are.
     fn nbt(&self, tag: &mut Tag) {
@@ -696,6 +768,21 @@ impl<'a> Plan<'a> {
             }
         }
     }
+}
+
+/// The shape of connecting state `id` (a chorus plant's) at `size` pixels,
+/// from its six sides in `facts.json`.
+fn pipe_state_shape(facts: &J, id: u32, size: f64) -> Result<VoxelShape> {
+    let Some(J::Arr(row)) = facts.get("states").and_then(|s| match s {
+        J::Arr(states) => states.get(id as usize),
+        _ => None,
+    }) else {
+        return Err(format!("facts.json: no state {id}").into());
+    };
+    let props = row.get(4).and_then(|p| p.get("properties"));
+    let sides = ["down", "up", "north", "south", "west", "east"]
+        .map(|k| matches!(props.and_then(|p| p.get(k)), Some(J::Str(v)) if v == "true"));
+    Ok(horizon_world::collision::pipe_shape(size, sides)?)
 }
 
 /// The JSON and NBT tables rewritten for new blocks and items.
@@ -1113,6 +1200,9 @@ fn tables(base: &Path, plan: &Plan, overlay: &Overlay<'_>) -> Result<()> {
             let (mut named, _) = nbt::read_named(&fs::read(&path)?, Limits::tables())
                 .map_err(|e| format!("{name}: {e}"))?;
             plan.nbt(&mut named.tag);
+            if name.ends_with("cached-collision.nbt") {
+                plan.pipe_collisions(&mut named.tag);
+            }
             nbt::write_named(&named, Limits::tables()).map_err(|e| format!("{name}: {e}"))?
         };
         overlay.write(name, &bytes)

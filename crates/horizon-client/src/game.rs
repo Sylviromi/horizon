@@ -2160,6 +2160,15 @@ impl Dim {
             _ => Self::Overworld,
         }
     }
+    /// The level's shape, from vanilla's dimension types.
+    fn shape(self) -> horizon_client::save::LevelShape {
+        use horizon_client::save::LevelShape;
+        match self {
+            Self::Overworld => LevelShape::OVERWORLD,
+            Self::Nether => LevelShape::NETHER,
+            Self::End => LevelShape::END,
+        }
+    }
     /// `Level.getMinY`: the dimension type's minimum y.
     fn min_y(self) -> i32 {
         match self {
@@ -9547,10 +9556,9 @@ impl Game<'_> {
         self.score = Default::default();
         self.fns = Default::default();
         self.world_tables = self.build_world_tables();
-        horizon_client::structure_blocks::forget_loot_data();
         // Warm the loot data with this world's packs before chunks decode
         // (`save::roll_loaded_loot` reads the cached copy).
-        let _ = horizon_client::structure_blocks::loot_data(
+        let _ = horizon_client::structure_blocks::world_loot_data(
             &self.options.resources,
             &pack_files(&self.world_tables),
         );
@@ -9675,7 +9683,7 @@ impl Game<'_> {
         self.clear_lod();
         self.pending_uploads.clear();
         if let Some(r) = self.renderer.as_mut() {
-            r.clear_sections();
+            r.clear_sections(self.world.layout());
         }
         self.apply_settings();
         self.streaming.sky_light = dim != Dim::Nether;
@@ -9774,7 +9782,7 @@ impl Game<'_> {
         self.clear_lod();
         self.pending_uploads.clear();
         if let Some(r) = self.renderer.as_mut() {
-            r.clear_sections();
+            r.clear_sections(self.world.layout());
         }
         self.apply_settings();
         Ok(destination)
@@ -9987,7 +9995,7 @@ impl Game<'_> {
         self.clear_lod();
         self.pending_uploads.clear();
         if let Some(r) = self.renderer.as_mut() {
-            r.clear_sections();
+            r.clear_sections(self.world.layout());
         }
         self.title = Some(Title::new(
             std::env::current_dir()?.join("saves"),
@@ -14456,6 +14464,7 @@ impl<'a> Game<'a> {
             std::env::current_dir()?
                 .join("saves")
                 .join(".horizon-title"),
+            horizon_client::save::LevelShape::OVERWORLD,
         ));
         let prepared = prepared
             .map(Ok)

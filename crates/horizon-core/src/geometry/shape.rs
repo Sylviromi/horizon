@@ -310,6 +310,57 @@ impl VoxelShape {
             index(self.sizes, x as usize, y as usize, z as usize),
         )
     }
+    /// Each cell, full or not, in grid order (x, then y, then z).
+    pub fn occupied(&self) -> Vec<bool> {
+        (0..volume(self.sizes).unwrap_or(0))
+            .map(|i| full(&self.occupancy, i))
+            .collect()
+    }
+    /// `VoxelShape.forAllEdges`: the outline's edges, `[x0, y0, z0, x1, y1,
+    /// z1]`, cells merged along each line (`DiscreteVoxelShape.forAllEdges`
+    /// with `mergeNeighbors`). An edge lies where the four cells around a
+    /// line hold one or three full ones, or two full ones diagonally.
+    pub fn edges(&self) -> Vec<[f64; 6]> {
+        let mut out = Vec::new();
+        // The line's axis, then the two around it (AxisCycle NONE, FORWARD, BACKWARD).
+        for (along, u, w) in [(2, 0, 1), (0, 1, 2), (1, 2, 0)] {
+            let at = |cu: i32, cw: i32, ca: i32| {
+                let mut p = [0; 3];
+                (p[u], p[w], p[along]) = (cu, cw, ca);
+                self.is_full(p[0], p[1], p[2])
+            };
+            let point = |cu: usize, cw: usize, ca: usize| {
+                let mut p = [0.0; 3];
+                p[u] = self.coords[u][cu];
+                p[w] = self.coords[w][cw];
+                p[along] = self.coords[along][ca];
+                p
+            };
+            for cu in 0..=self.sizes[u] {
+                for cw in 0..=self.sizes[w] {
+                    let mut start = None;
+                    for ca in 0..=self.sizes[along] {
+                        let (mut full, mut odd) = (0, 0);
+                        for du in 0..=1 {
+                            for dw in 0..=1 {
+                                if at(cu as i32 + du - 1, cw as i32 + dw - 1, ca as i32) {
+                                    full += 1;
+                                    odd ^= du ^ dw;
+                                }
+                            }
+                        }
+                        if full == 1 || full == 3 || (full == 2 && odd & 1 == 0) {
+                            start.get_or_insert(ca);
+                        } else if let Some(s) = start.take() {
+                            let (a, b) = (point(cu, cw, s), point(cu, cw, ca));
+                            out.push([a[0], a[1], a[2], b[0], b[1], b[2]]);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
     pub fn find_index(&self, axis: Axis, value: f64) -> i32 {
         let i = axis as usize;
         if self.cube {
