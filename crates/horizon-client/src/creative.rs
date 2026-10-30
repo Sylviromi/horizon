@@ -23,6 +23,9 @@ pub struct Tab {
     /// `CreativeModeTab.Type.HOTBAR`: the saved toolbars, filled when the
     /// tab is selected (`set_saved_hotbars`).
     pub hotbar: bool,
+    /// The page of tabs it is on: vanilla's are 0, mods' after, as NeoForge
+    /// pages them.
+    pub page: u32,
 }
 /// What the client's creative search trees (SessionSearchTrees) index for one
 /// stack of the search tab: its creative tooltip lines and its item tags.
@@ -39,6 +42,8 @@ struct SearchEntry {
 pub struct Creative {
     pub tabs: Vec<Tab>,
     pub selected: usize,
+    /// The page of tabs shown.
+    pub page: u32,
     /// Scroll position 0..1 (scrollOffs).
     pub scroll: f32,
     /// The scrollbar is held (scrolling): dragging moves it.
@@ -248,6 +253,7 @@ impl Creative {
                 search: kind == "SEARCH",
                 inventory: kind == "INVENTORY",
                 hotbar: kind == "HOTBAR",
+                page: t["page"].as_u64().unwrap_or(0) as u32,
             });
         }
         Ok(Self::new(tabs, search_items, search_index))
@@ -282,6 +288,7 @@ impl Creative {
                 search: kind == "SEARCH",
                 inventory: kind == "INVENTORY",
                 hotbar: false,
+                page: 0,
             });
         }
         let search_index = search_items
@@ -301,6 +308,7 @@ impl Creative {
         Self {
             tabs,
             selected: 0,
+            page: 0,
             scroll: 0.0,
             scrolling: false,
             search: {
@@ -339,6 +347,7 @@ impl Creative {
                 search: t.search,
                 inventory: t.inventory,
                 hotbar: t.hotbar,
+                page: t.page,
             })
             .collect()
     }
@@ -346,16 +355,47 @@ impl Creative {
         &self.tabs[self.selected.min(self.tabs.len() - 1)]
     }
     /// selectTab: a different tab empties the search box; the scrollbar goes to the top.
+    /// A tab on another page shows that page.
     pub fn select(&mut self, tab: usize) {
         if tab != self.selected {
             self.search.set_value("");
         }
         self.selected = tab;
+        if let Some(t) = self.tabs.get(tab)
+            && !Self::on_every_page(t)
+        {
+            self.page = t.page;
+        }
         self.scroll = 0.0;
         if self.tab().search {
             self.search.focused = true;
             self.search.reset_blink();
         }
+    }
+    /// How many pages of tabs there are (1 without mods' tabs).
+    pub fn pages(&self) -> u32 {
+        self.tabs.iter().map(|t| t.page + 1).max().unwrap_or(1)
+    }
+    /// The tabs every page shows (NeoForge's): the right-hand ones, saved
+    /// hotbars, search, operator blocks and the inventory.
+    fn on_every_page(t: &Tab) -> bool {
+        t.column >= 5
+    }
+    /// Whether tab `t` shows on the page shown.
+    pub fn on_page(&self, t: &Tab) -> bool {
+        t.page == self.page || Self::on_every_page(t)
+    }
+    /// Shows page `page` (NeoForge's page buttons) and selects its first tab.
+    pub fn set_page(&mut self, page: u32) {
+        let page = page.min(self.pages() - 1);
+        if let Some(first) = self
+            .tabs
+            .iter()
+            .position(|t| t.page == page && !Self::on_every_page(t))
+        {
+            self.select(first);
+        }
+        self.page = page;
     }
     /// The search tab's stacks.
     pub fn search_items(&self) -> &[ItemStack] {
@@ -1275,6 +1315,7 @@ mod tests {
             search: false,
             inventory: false,
             hotbar: false,
+            page: 0,
         };
         // Top row, second column: the button spans x 27..53, y -28..4.
         let t = tab(true, 1);

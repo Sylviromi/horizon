@@ -95,6 +95,18 @@ gets its own damage and durability, or a tool its mining speed:
     "!minecraft:repairable": {} } }
 ```
 
+A mod's creative inventory tabs are `data/<id>/horizon/creative_tab/*.json`:
+a title, the item on the tab's button, and its items in order (items the game
+doesn't have are left out):
+
+```json
+{ "title": "Ruby", "icon": "ruby:ruby", "items": ["ruby:ruby", "ruby:ruby_block"] }
+```
+
+They come after vanilla's tabs, ten to a page as NeoForge pages them; the
+buttons above the inventory turn the pages. A mod's items join the search tab
+under their English names.
+
 A component type no vanilla item has is refused, so a misspelt one fails
 the load instead of doing nothing. Behaviour the game ties to a vanilla
 item's id doesn't come along yet: a copy of the trident doesn't throw
