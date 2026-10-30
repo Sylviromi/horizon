@@ -13,6 +13,72 @@ use crate::{
 use horizon_core::geometry::{Axis, VoxelShape};
 use std::{collections::HashMap, io};
 
+/// `PipeBlock`'s shape for `size` pixels across (`makeShapes`): the core
+/// cube, with an arm from the centre out to each joined side (`sides` by
+/// `Direction`: down, up, north, south, west, east).
+pub fn pipe_shape(size: f64, sides: [bool; 6]) -> io::Result<VoxelShape> {
+    use horizon_core::geometry::{Aabb, ShapeOp, Vec3};
+    let (lo, hi) = ((8.0 - size / 2.0) / 16.0, (8.0 + size / 2.0) / 16.0);
+    let shape = |min: [f64; 3], max: [f64; 3]| {
+        VoxelShape::from_box(Aabb::new(
+            Vec3::new(min[0], min[1], min[2]),
+            Vec3::new(max[0], max[1], max[2]),
+        ))
+        .map_err(|e| invalid(e.to_string()))
+    };
+    let mut result = shape([lo; 3], [hi; 3])?;
+    let arms = [
+        ([lo, 0.0, lo], [hi, 0.5, hi]),
+        ([lo, 0.5, lo], [hi, 1.0, hi]),
+        ([lo, lo, 0.0], [hi, hi, 0.5]),
+        ([lo, lo, 0.5], [hi, hi, 1.0]),
+        ([0.0, lo, lo], [0.5, hi, hi]),
+        ([0.5, lo, lo], [1.0, hi, hi]),
+    ];
+    for (joined, (min, max)) in sides.into_iter().zip(arms) {
+        if joined {
+            result = shape(min, max)?
+                .join(&result, ShapeOp::OR)
+                .map_err(|e| invalid(e.to_string()))?;
+        }
+    }
+    Ok(result)
+}
+
+/// A shape as an entry of the cached collision table's `shapes`, as
+/// `CachedCollisionRegistry::from_table` reads it.
+pub fn shape_entry(shape: &VoxelShape) -> Tag {
+    let coords = |axis: Axis| {
+        Tag::LongArray(
+            shape
+                .coordinates(axis)
+                .iter()
+                .map(|v| v.to_bits() as i64)
+                .collect(),
+        )
+    };
+    let axes = shape.cube_coordinate_axes();
+    let (min, max) = shape.discrete_bounds();
+    Tag::compound(vec![
+        // Not one of the canonical empty, block or unit identities.
+        ("canonical", Tag::Byte(0)),
+        ("x", coords(Axis::X)),
+        ("y", coords(Axis::Y)),
+        ("z", coords(Axis::Z)),
+        (
+            "occupied",
+            Tag::ByteArray(shape.occupied().into_iter().map(u8::from).collect()),
+        ),
+        (
+            "cube_axes",
+            Tag::Byte(i8::from(axes[0]) | i8::from(axes[1]) << 1 | i8::from(axes[2]) << 2),
+        ),
+        ("discrete_min", Tag::IntArray(min.to_vec())),
+        ("discrete_max", Tag::IntArray(max.to_vec())),
+        ("cube", Tag::Byte(i8::from(shape.is_cube()))),
+    ])
+}
+
 #[derive(PartialEq, Eq, Hash)]
 struct GridKey {
     coords: [Vec<u64>; 3],
@@ -228,5 +294,106 @@ impl<'r> CachedCollisionRegistry<'r> {
             return Err(invalid("section uses a different collision registry"));
         }
         self.cached_shape(section.get(index)?)
+    }
+}
+
+#[cfg(test)]
+mod pipe_tests {
+    use super::*;
+    use crate::registry::BlockTableFile;
+    use std::path::PathBuf;
+
+    /// `pipe_shape` at the chorus plant's 10 pixels is vanilla's own shape for
+    /// each of its 64 states: the cached collision entry, the outline's boxes
+    /// and its edges.
+    #[test]
+    fn pipe_shapes_match_the_chorus_plant() {
+        let root = std::env::var_os("HORIZON_RESOURCES")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../.local/horizon-client")
+                    .join(horizon_core::VANILLA_VERSION)
+            });
+        if !root.join("gameplay-facts.json").exists() {
+            eprintln!("skipping: no resources at {}", root.display());
+            return;
+        }
+        let registry = crate::level::data::load_registry(&root).unwrap();
+        let file = BlockTableFile::open(&root.join("cached-collision.nbt"), &registry).unwrap();
+        let cached = CachedCollisionRegistry::from_table(file.table("collision").unwrap()).unwrap();
+        let facts: serde_json::Value =
+            serde_json::from_reader(std::fs::File::open(root.join("gameplay-facts.json")).unwrap())
+                .unwrap();
+        let round = |v: &[f64]| {
+            v.iter()
+                .map(|x| (x * 1e6).round() as i64)
+                .collect::<Vec<_>>()
+        };
+        let mut checked = 0;
+        for id in 0..registry.len() as u32 {
+            let state = BlockStateId(id);
+            let s = registry.state(state).unwrap();
+            if s.name != "minecraft:chorus_plant" {
+                continue;
+            }
+            let sides = ["down", "up", "north", "south", "west", "east"]
+                .map(|k| s.properties.get(k).map(String::as_str) == Some("true"));
+            let ours = pipe_shape(10.0, sides).unwrap();
+            let theirs = cached.cached_shape(state).unwrap().unwrap();
+            assert_eq!(shape_entry(&ours), shape_entry(theirs), "{sides:?}");
+            let row = &facts["states"][id as usize];
+            let mut outline: Vec<_> = row["outline"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| {
+                    round(
+                        &b.as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|v| v.as_f64().unwrap())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect();
+            let mut boxes: Vec<_> = ours
+                .boxes()
+                .iter()
+                .map(|b| {
+                    round(&[
+                        b.min(Axis::X),
+                        b.min(Axis::Y),
+                        b.min(Axis::Z),
+                        b.max(Axis::X),
+                        b.max(Axis::Y),
+                        b.max(Axis::Z),
+                    ])
+                })
+                .collect();
+            outline.sort();
+            boxes.sort();
+            assert_eq!(boxes, outline, "{sides:?}");
+            let mut edges: Vec<_> = row["outline_edges"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|b| {
+                    round(
+                        &b.as_array()
+                            .unwrap()
+                            .iter()
+                            .map(|v| v.as_f64().unwrap())
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect();
+            let mut ours_edges: Vec<_> = ours.edges().iter().map(|e| round(e)).collect();
+            edges.sort();
+            ours_edges.sort();
+            assert_eq!(ours_edges, edges, "{sides:?}");
+            checked += 1;
+        }
+        assert_eq!(checked, 64);
     }
 }
