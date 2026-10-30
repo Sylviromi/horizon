@@ -112,6 +112,26 @@ pub struct Block {
     pub thickness: Option<f32>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreativeTabFile {
+    title: String,
+    icon: String,
+    items: Vec<String>,
+}
+
+/// A creative inventory tab the mod adds (`data/<id>/horizon/creative_tab/`):
+/// its title, the item on its button, and its items in order. Items no mod
+/// or vanilla registers are left out when the game loads.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CreativeTab {
+    /// `<mod id>:<path>`.
+    pub id: String,
+    pub title: String,
+    pub icon: String,
+    pub items: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum Rarity {
@@ -158,6 +178,8 @@ pub struct Content {
     pub files: Vec<String>,
     pub blocks: Vec<Block>,
     pub items: Vec<Item>,
+    /// Its creative inventory tabs, by id.
+    pub creative_tabs: Vec<CreativeTab>,
     /// The namespaces it owns: the mod id, then the manifest's `namespaces`.
     pub namespaces: Vec<String>,
 }
@@ -244,6 +266,7 @@ impl Content {
             files,
             blocks: Vec::new(),
             items: Vec::new(),
+            creative_tabs: Vec::new(),
             namespaces: manifest.owned_namespaces().map(str::to_owned).collect(),
         };
         content.check(manifest)?;
@@ -286,6 +309,7 @@ impl Content {
         }
         let mut blocks = Vec::new();
         let mut items = Vec::new();
+        let mut tabs = Vec::new();
         for name in &self.files {
             let mut parts = name.splitn(3, '/');
             let (top, namespace, rest) = (
@@ -326,9 +350,11 @@ impl Content {
                 blocks.push((block, name.clone()));
             } else if let Some(item) = parse("item") {
                 items.push((item, name.clone()));
+            } else if let Some(tab) = parse("creative_tab") {
+                tabs.push((tab, name.clone()));
             } else {
                 return Err(format!(
-                    "{name}: data/{id}/horizon/ holds block/*.json and item/*.json only"
+                    "{name}: data/{id}/horizon/ holds block/*.json, item/*.json and creative_tab/*.json only"
                 ));
             }
         }
@@ -373,6 +399,25 @@ impl Content {
                 max_stack_size: file.max_stack_size,
                 rarity: file.rarity,
                 components: file.components,
+            });
+        }
+        for (tab, name) in tabs {
+            let file: CreativeTabFile =
+                serde_json::from_slice(&self.file(&name)?).map_err(|e| format!("{name}: {e}"))?;
+            let id_like = |s: &str| {
+                s.split_once(':')
+                    .is_some_and(|(n, p)| !n.is_empty() && !p.is_empty())
+            };
+            if !id_like(&file.icon) || !file.items.iter().all(|i| id_like(i)) {
+                return Err(format!(
+                    "{name}: icon and items are item ids (namespace:path)"
+                ));
+            }
+            self.creative_tabs.push(CreativeTab {
+                id: tab,
+                title: file.title,
+                icon: file.icon,
+                items: file.items,
             });
         }
         Ok(())
@@ -624,6 +669,30 @@ capabilities = ["registries"]
             let e = block(&json).unwrap_err();
             assert!(e.contains("block tag"), "{tag}: {e}");
         }
+    }
+
+    /// A creative tab: a title, an icon and its items, all item ids.
+    #[test]
+    fn creative_tabs_name_their_items() {
+        let tab = |json: &str| {
+            let files: &[(&str, &[u8])] =
+                &[("data/ruby/horizon/creative_tab/gems.json", json.as_bytes())];
+            hmod("tab", MANIFEST_TEXT, files)
+        };
+        let content =
+            tab(r#"{"title": "Ruby Gems", "icon": "ruby:ruby", "items": ["ruby:ruby", "minecraft:diamond"]}"#)
+                .unwrap();
+        assert_eq!(
+            content.creative_tabs,
+            [CreativeTab {
+                id: "ruby:gems".into(),
+                title: "Ruby Gems".into(),
+                icon: "ruby:ruby".into(),
+                items: vec!["ruby:ruby".into(), "minecraft:diamond".into()],
+            }]
+        );
+        let e = tab(r#"{"title": "Gems", "icon": "ruby", "items": []}"#).unwrap_err();
+        assert!(e.contains("item ids"), "{e}");
     }
 
     #[test]
