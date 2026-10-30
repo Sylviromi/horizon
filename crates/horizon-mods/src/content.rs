@@ -81,6 +81,8 @@ struct BlockFile {
     template: String,
     #[serde(default)]
     properties: BlockProperties,
+    #[serde(default)]
+    connects_to: Option<String>,
     #[serde(default = "yes")]
     item: bool,
 }
@@ -99,6 +101,10 @@ pub struct Block {
     pub properties: BlockProperties,
     /// Also add a block item with the same id.
     pub item: bool,
+    /// A connecting block (template `minecraft:chorus_plant`, a `PipeBlock`
+    /// without the chorus plant's rules): the block tag, without `#`, whose
+    /// blocks it joins besides itself (a cable's machines).
+    pub connects_to: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -334,6 +340,9 @@ impl Content {
                 template: file.template,
                 properties: file.properties,
                 item: file.item,
+                connects_to: file
+                    .connects_to
+                    .map(|t| t.trim_start_matches('#').to_owned()),
             });
         }
         for (item, name) in items {
@@ -415,6 +424,23 @@ fn check_block(file: &BlockFile) -> Result<(), String> {
     }
     if p.sounds.as_deref().is_some_and(|s| !vanilla_id(s)) {
         return Err("sounds names a vanilla block (minecraft:...)".into());
+    }
+    if let Some(tag) = &file.connects_to {
+        if file.template != "minecraft:chorus_plant" {
+            return Err("connects_to needs template minecraft:chorus_plant (a PipeBlock)".into());
+        }
+        let id = tag.strip_prefix('#').unwrap_or_default();
+        let valid = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "_-./".contains(c))
+        };
+        if !id
+            .split_once(':')
+            .is_some_and(|(ns, path)| valid(ns) && valid(path))
+        {
+            return Err("connects_to is a block tag, #namespace:path".into());
+        }
     }
     Ok(())
 }
@@ -506,6 +532,7 @@ capabilities = ["registries"]
                     ..BlockProperties::default()
                 },
                 item: true,
+                connects_to: None,
             }]
         );
         assert_eq!(content.items[0].id, "ruby:ruby");
@@ -548,6 +575,33 @@ capabilities = ["registries"]
         assert_eq!(content.files, ["data/ruby/horizon/block/ruby_block.json"]);
         assert_eq!(content.file(&content.files[0]).unwrap(), BLOCK);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A connecting block names a block tag and copies a `PipeBlock`.
+    #[test]
+    fn connecting_blocks_copy_a_pipe_and_name_a_tag() {
+        let block = |json: &str| {
+            let files: &[(&str, &[u8])] =
+                &[("data/ruby/horizon/block/cable.json", json.as_bytes())];
+            hmod("cable", MANIFEST_TEXT, files)
+        };
+        let content = block(
+            r##"{"template": "minecraft:chorus_plant", "connects_to": "#ruby:cable_joins"}"##,
+        )
+        .unwrap();
+        assert_eq!(
+            content.blocks[0].connects_to.as_deref(),
+            Some("ruby:cable_joins")
+        );
+        let e = block(r##"{"template": "minecraft:stone", "connects_to": "#ruby:cable_joins"}"##)
+            .unwrap_err();
+        assert!(e.contains("chorus_plant"), "{e}");
+        for tag in ["ruby:cable_joins", "#cable_joins", "#Ruby:Cable"] {
+            let json =
+                format!(r#"{{"template": "minecraft:chorus_plant", "connects_to": "{tag}"}}"#);
+            let e = block(&json).unwrap_err();
+            assert!(e.contains("block tag"), "{tag}: {e}");
+        }
     }
 
     #[test]
