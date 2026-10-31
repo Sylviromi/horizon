@@ -121,6 +121,18 @@ the tag, on placement and whenever that neighbour changes. Its shapes are the
 chorus plant's (10 pixels across) unless it sets `"thickness"`, 2 to 14
 pixels: its outline and collision are then built as `PipeBlock` builds its
 own, a core and an arm to each joined side.
+A mod's creative inventory tabs are `data/<id>/horizon/creative_tab/*.json`:
+a title, the item on the tab's button, and its items in order (items the game
+doesn't have are left out):
+
+```json
+{ "title": "Ruby", "icon": "ruby:ruby", "items": ["ruby:ruby", "ruby:ruby_block"] }
+```
+
+They come after vanilla's tabs, ten to a page as NeoForge pages them; the
+buttons above the inventory turn the pages. The title is English; a lang file's
+`itemGroup.<mod id>.<file name>` (`creative_tab/gems.json` → `itemGroup.ruby.gems`) translates it. A
+mod's items join the search tab under their names.
 
 A component type no vanilla item has is refused, so a misspelt one fails
 the load instead of doing nothing. Behaviour the game ties to a vanilla
